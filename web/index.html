@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Julia on Verified Wasm</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --fg: #e6e8ee;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px 16px;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: system-ui, -apple-system, "Hiragino Sans", sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+  .stage {
+    width: 100%;
+    max-width: 1200px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+  canvas {
+    display: block;
+    flex: 1 1 360px;
+    min-width: 0;
+    aspect-ratio: 3 / 2;
+    border-radius: 8px;
+    background: #000;
+  }
+  .err { max-width: 1200px; color: #ff7070; white-space: pre-wrap; font-size: 0.85rem; margin: 0; }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <canvas id="cv" width="480" height="320"></canvas>
+    <canvas id="map" width="480" height="320"></canvas>
+  </div>
+  <p class="err" id="err"></p>
+
+<script type="module">
+const WASM_URL = "../out/julia.wasm";
+const Q = 8192;          // 1.0 の固定小数点表現（小数部13ビット）
+const MAX = 200;         // Julia.prog の反復回数の上限
+const VIEW_W = 3.6;      // 複素平面で表示する幅
+const K = 1.06;          // c はマンデルブロ集合のカージオイドを K 倍した曲線の上を動く
+
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const W = cv.width, H = cv.height;
+const img = ctx.createImageData(W, H);
+const px32 = new Uint32Array(img.data.buffer);
+
+// 反復回数 → 色（ABGR、リトルエンディアン）の表を先に作る
+const stops = [[0, 7, 100], [32, 107, 203], [237, 255, 255], [255, 170, 0], [0, 2, 0]];
+const lut = new Uint32Array(MAX + 1);
+for (let n = 0; n <= MAX; n++) {
+  let r = 0, g = 0, b = 0;
+  if (n < MAX) {
+    const t = Math.sqrt(n / MAX) * (stops.length - 1);
+    const k = Math.min(Math.floor(t), stops.length - 2), f = t - k;
+    [r, g, b] = stops[k].map((a, j) => Math.round(a + (stops[k + 1][j] - a) * f));
+  }
+  lut[n] = (255 << 24) | (b << 16) | (g << 8) | r;
+}
+
+// 画素の座標（固定小数点）は毎フレーム同じなので先に計算しておく
+const scale = VIEW_W / W;
+const zxs = new Int32Array(W), zys = new Int32Array(H);
+for (let x = 0; x < W; x++) zxs[x] = Math.round((x - W / 2) * scale * Q);
+for (let y = 0; y < H; y++) zys[y] = Math.round((y - H / 2) * scale * Q);
+
+let main;
+try {
+  const res = await fetch(WASM_URL);
+  if (!res.ok) throw new Error(`${WASM_URL} を読み込めません (${res.status})`);
+  ({ instance: { exports: { main } } } = await WebAssembly.instantiate(await res.arrayBuffer()));
+} catch (e) {
+  document.getElementById("err").textContent =
+    `${e.message}\nリポジトリのルートで lake exe lean-verified-compiler と wat2wasm out/julia.wat -o out/julia.wasm を実行し、python3 -m http.server で配信してから web/ を開いてください。`;
+  throw e;
+}
+
+function render(c) {
+  const cx = Math.round(c.re * Q), cy = Math.round(c.im * Q);
+  let p = 0;
+  for (let y = 0; y < H; y++) {
+    const zy = zys[y];
+    for (let x = 0; x < W; x++) px32[p++] = lut[main(0, zxs[x], zy, cx, cy, 0, 0)];
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+// 主カージオイドの境界 e^{it}/2 − e^{2it}/4 の少し外側。境界の近くほど複雑な形になる
+function cardioid(t) {
+  return {
+    re: K * (Math.cos(t) / 2 - Math.cos(2 * t) / 4),
+    im: K * (Math.sin(t) / 2 - Math.sin(2 * t) / 4),
+  };
+}
+
+// ---- c の地図：同じ main を z = 0、c = 画素 として呼ぶとマンデルブロ集合になる ----
+const map = document.getElementById("map");
+const mctx = map.getContext("2d");
+const MW = map.width, MH = map.height;
+const M_RE0 = -2.1, M_W = 2.75;                 // 実部の範囲 [-2.1, 0.65]
+const M_IM0 = -(M_W * MH / MW) / 2;             // 虚部は 0 を中心に同じ縮尺
+const mapImg = mctx.createImageData(MW, MH);
+{
+  const m32 = new Uint32Array(mapImg.data.buffer);
+  let p = 0;
+  for (let y = 0; y < MH; y++) {
+    const cy = Math.round((M_IM0 + (y + 0.5) * M_W / MW) * Q);
+    for (let x = 0; x < MW; x++) {
+      const cx = Math.round((M_RE0 + (x + 0.5) * M_W / MW) * Q);
+      m32[p++] = lut[main(0, 0, 0, cx, cy, 0, 0)];
+    }
+  }
+}
+const toMap = (c) => [(c.re - M_RE0) / M_W * MW, (c.im - M_IM0) / M_W * MW];
+
+function drawMap(c) {
+  mctx.putImageData(mapImg, 0, 0);
+  // アニメーションで c が通る曲線
+  mctx.strokeStyle = "#ff5ad9";
+  mctx.lineWidth = 2;
+  mctx.setLineDash([4, 4]);
+  mctx.beginPath();
+  for (let k = 0; k <= 256; k++) {
+    const [x, y] = toMap(cardioid(k / 256 * 2 * Math.PI));
+    k === 0 ? mctx.moveTo(x, y) : mctx.lineTo(x, y);
+  }
+  mctx.stroke();
+  mctx.setLineDash([]);
+  // 現在の c
+  const [x, y] = toMap(c);
+  mctx.fillStyle = "#ff3b3b";
+  mctx.strokeStyle = "#fff";
+  mctx.lineWidth = 2;
+  mctx.beginPath();
+  mctx.arc(x, y, 6, 0, 2 * Math.PI);
+  mctx.fill();
+  mctx.stroke();
+}
+
+// c を曲線に沿って動かし続ける（1周 約25秒）
+function frame(now) {
+  const c = cardioid(2.0 + now * 0.00025);
+  render(c);
+  drawMap(c);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

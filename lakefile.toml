@@ -1,0 +1,13 @@
+name = "lean-verified-compiler"
+version = "0.1.0"
+defaultTargets = ["lean-verified-compiler"]
+
+[leanOptions]
+autoImplicit = false
+
+[[lean_lib]]
+name = "LeanVerifiedCompiler"
+
+[[lean_exe]]
+name = "lean-verified-compiler"
+root = "Main"
