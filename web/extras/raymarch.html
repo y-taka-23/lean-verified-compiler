@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ray Marching</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --fg: #e6e8ee;
+    --view-w: 480px;   /* JS が「描画解像度 ÷ 画素密度」に設定する */
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px 16px;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: system-ui, -apple-system, "Hiragino Sans", sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    max-width: var(--view-w);
+    aspect-ratio: 3 / 2;
+    border-radius: 8px;
+    background: #000;
+  }
+  .err { max-width: var(--view-w); color: #ff7070; white-space: pre-wrap; font-size: 0.85rem; margin: 0; }
+</style>
+</head>
+<body>
+  <canvas id="cv"></canvas>
+  <p class="err" id="err"></p>
+
+<script type="module">
+const WASM_URL = "../../out/raymarching.wasm";
+const Q = 1024;                       // 1.0 の固定小数点表現（小数部10ビット）
+const FOV_Y = 40 * Math.PI / 180;     // 縦の視野角
+const PITCH = 18 * Math.PI / 180;     // カメラを下に傾ける角度
+const W = 960, H = 640;               // 描画解像度（画素数に比例して時間がかかる）
+
+let main;
+try {
+  const res = await fetch(WASM_URL);
+  if (!res.ok) throw new Error(`${WASM_URL} を読み込めません (${res.status})`);
+  ({ instance: { exports: { main } } } = await WebAssembly.instantiate(await res.arrayBuffer()));
+} catch (e) {
+  document.getElementById("err").textContent =
+    `${e.message}\nリポジトリのルートで lake exe extras と wat2wasm out/raymarching.wat -o out/raymarching.wasm を実行し、python3 -m http.server で配信してから web/extras/raymarch.html を開いてください。`;
+  throw e;
+}
+
+// 表示サイズを「描画解像度 ÷ 画面の画素密度」にして、1 画素を画面の 1 画素にそのまま対応させる
+// （Retina では 480 px 幅で表示）。引き伸ばさないので、解像度を下げてもぼやけない。
+document.documentElement.style.setProperty("--view-w", `${W / (window.devicePixelRatio || 1)}px`);
+const cv = document.getElementById("cv");
+cv.width = W;
+cv.height = H;
+const ctx = cv.getContext("2d");
+const img = ctx.createImageData(W, H);
+const px32 = new Uint32Array(img.data.buffer);
+
+// main の戻り値 = 材質 * 256 + 明るさ（0〜255）。0 は外れ（空）。
+const MATERIALS = {
+  1: [120, 170, 220],   // 床（明るいマス）
+  2: [40, 60, 90],      // 床（暗いマス）
+  3: [235, 235, 235],   // 球
+  4: [235, 150, 60],    // トーラス
+  5: [220, 70, 80],     // 赤
+  6: [80, 200, 140],    // 緑
+  7: [240, 200, 60],    // 黄
+  8: [150, 110, 230],   // 紫
+};
+// 空：地平線付近は明るく、上に行くほど濃い色（dy はレイの上向き成分 -1〜1）
+const SKY_HORIZON = [150, 170, 200], SKY_TOP = [20, 30, 60];
+function sky(dy) {
+  const s = Math.sqrt(Math.min(1, Math.max(0, dy)));
+  return SKY_HORIZON.map((c, j) => Math.round(c + (SKY_TOP[j] - c) * s));
+}
+const pack = ([r, g, b]) => (255 << 24) | (b << 16) | (g << 8) | r;
+function shade(v, dy) {
+  const m = v >> 8, br = (v & 255) / 255;
+  if (v === 0 || !MATERIALS[m]) return pack(sky(dy));
+  return pack(MATERIALS[m].map((c) => Math.round(c * br)));
+}
+
+// 画素 → レイの向き。カメラは原点にあり、+z 方向から PITCH だけ下を向く（x は右、y は上）。
+// 画面は距離 focal の位置にある仮想スクリーンで、そこへ向かうベクトルを x 軸まわりに
+// PITCH 回してから長さ 1 に正規化する。
+// main の引数の数は Lean 側の変数の数で決まるので、関数の length から取る。
+const focal = (H / 2) / Math.tan(FOV_Y / 2);
+const cp = Math.cos(PITCH), sp = Math.sin(PITCH);
+const args = new Array(main.length).fill(0);
+function renderRow(y) {
+  const v = H / 2 - (y + 0.5);
+  for (let x = 0; x < W; x++) {
+    const u = x + 0.5 - W / 2;
+    const dy = v * cp - focal * sp, dz = v * sp + focal * cp;
+    const len = Math.hypot(u, dy, dz);
+    args[1] = Math.round(u / len * Q);
+    args[2] = Math.round(dy / len * Q);
+    args[3] = Math.round(dz / len * Q);
+    px32[y * W + x] = shade(main(...args), dy / len);
+  }
+}
+
+// 時間がかかるので、数十ミリ秒ごとに描けた行まで表示しながら描く
+let y = 0;
+function step() {
+  const until = performance.now() + 40;
+  const y0 = y;
+  while (y < H && performance.now() < until) renderRow(y++);
+  ctx.putImageData(img, 0, 0, 0, y0, W, y - y0);
+  if (y < H) setTimeout(step, 0);
+}
+step();
+</script>
+</body>
+</html>

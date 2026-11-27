@@ -11,3 +11,17 @@ name = "LeanVerifiedCompiler"
 [[lean_exe]]
 name = "lean-verified-compiler"
 root = "Main"
+
+# 誌面に載せていない隠しサンプルです。見つけた方はおめでとう！
+#
+# lake exe extras
+# wat2wasm out/raymarching.wat -o out/raymarching.wasm
+# python3 -m http.server 8000
+#
+# http://localhost:8000/web/extras/raymarch.html をブラウザで開いてみよう
+[[lean_lib]]
+name = "Extras"
+
+[[lean_exe]]
+name = "extras"
+root = "Extras.Main"
