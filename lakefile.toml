@@ -16,9 +16,12 @@ root = "Main"
 #
 # lake exe extras
 # wat2wasm out/raymarching.wat -o out/raymarching.wasm
+# wat2wasm out/seasons.wat -o out/seasons.wasm
 # python3 -m http.server 8000
 #
-# http://localhost:8000/web/extras/raymarch.html をブラウザで開いてみよう
+# http://localhost:8000/web/extras/raymarch.html
+# http://localhost:8000/web/extras/seasons.html
+# をブラウザで開いてみよう
 [[lean_lib]]
 name = "Extras"
 

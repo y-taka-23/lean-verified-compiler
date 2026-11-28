@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Four Seasons</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --fg: #e6e8ee;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px 16px;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: system-ui, -apple-system, "Hiragino Sans", sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    max-width: 960px;
+    aspect-ratio: 8 / 5;
+    border-radius: 8px;
+    background: #000;
+  }
+  .err { max-width: 960px; color: #ff7070; white-space: pre-wrap; font-size: 0.85rem; margin: 0; }
+</style>
+</head>
+<body>
+  <canvas id="cv" width="960" height="600"></canvas>
+  <p class="err" id="err"></p>
+
+<script type="module">
+const WASM_URL = "../../out/seasons.wasm";
+const W = 960, H = 600;
+const Q = 256;
+const SEASON_SEC = 10;
+const R = 44, FAR = R * 0.95, STEP = 256;
+
+let main;
+try {
+  const res = await fetch(WASM_URL);
+  if (!res.ok) throw new Error(`${WASM_URL} を読み込めません (${res.status})`);
+  ({ instance: { exports: { main } } } = await WebAssembly.instantiate(await res.arrayBuffer()));
+} catch (e) {
+  document.getElementById("err").textContent =
+    `${e.message}\nリポジトリのルートで lake exe extras と wat2wasm out/seasons.wat -o out/seasons.wasm を実行し、python3 -m http.server で配信してから web/extras/seasons.html を開いてください。`;
+  throw e;
+}
+
+// main(out, mode, a0..a13, 作業用変数...)
+const NA = 14;
+const ps = Array.from({ length: NA }, (_, i) => `a${i}`);
+const f = new Function("main", `return (m, ${ps.join(", ")}) => main(0, m, ${ps.join(", ")}${", 0".repeat(main.length - 2 - NA)});`)(main);
+const [TERRAIN, PROJECT, DEPTH, SHADE, SKY, TREE_BASE, TREE_KIND, TREE_VERTEX, SNOW, SNOW_AMOUNT, ALTITUDE] =
+  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+const NONE = -1048576;
+
+const ctx = document.getElementById("cv").getContext("2d");
+const rgbCache = new Map();
+const rgb = (v) => {
+  let c = rgbCache.get(v);
+  if (!c) rgbCache.set(v, c = `rgb(${v >> 16 & 255},${v >> 8 & 255},${v & 255})`);
+  return c;
+};
+
+const CONIFER = [];
+for (const b of [0, 6]) for (let k = 0; k < 5; k++) CONIFER.push([b + k, b + (k + 1) % 5, b + 5, 2]);
+const BROADLEAF = [];
+for (const [a, b, c, d] of [[0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]]) BROADLEAF.push([a, b, c, 5], [a, c, d, 5]);
+for (let k = 0; k < 6; k++) {
+  const k1 = (k + 1) % 6;
+  BROADLEAF.push([8, 9 + k, 9 + k1, 0], [9 + k, 15 + k, 9 + k1, 0], [9 + k1, 15 + k, 15 + k1, 0], [21, 15 + k1, 15 + k, 0]);
+}
+
+const SPEED = 4, CLEARANCE = 5;
+const path = (t) => [600 + 40 * Math.sin(t * 0.08) + 12 * Math.sin(t * 0.21), 300 + SPEED * t];
+function altitude(t) {
+  let sum = 0, wsum = 0;
+  for (let k = -8; k <= 8; k++) {
+    const [x, z] = path(t + k * 0.25);
+    const top = f(ALTITUDE, Math.round(x * Q), Math.round(z * Q)) / Q;
+    const w = 9 - Math.abs(k);
+    sum += Math.log1p(Math.exp(top)) * w;
+    wsum += w;
+  }
+  return sum / wsum + CLEARANCE;
+}
+
+let cam, tick;
+const project = (x, y, z) => {
+  const v = f(PROJECT, x, y, z, cam.x, cam.y, cam.z, cam.cy, cam.sy, cam.cp, cam.sp) >>> 0;
+  return [((v >>> 16) - 32768) / 4, ((v & 0xffff) - 32768) / 4, f(DEPTH, x, y, z, cam.x, cam.y, cam.z, cam.cy, cam.sy, cam.cp, cam.sp)];
+};
+
+function frame(now) {
+  const t = now / 1000;
+  tick = Math.floor(t * 4096 / SEASON_SEC);
+  const [x, z] = path(t), [x2, z2] = path(t + 0.01);
+  const yaw = Math.atan2(x2 - x, z2 - z), pitch = 0.28;
+  const fx = x, fz = z;
+  cam = {
+    x: Math.round(x * Q), y: Math.round(altitude(t) * Q), z: Math.round(z * Q),
+    cy: Math.round(Math.cos(yaw) * 4096), sy: Math.round(Math.sin(yaw) * 4096),
+    cp: Math.round(Math.cos(pitch) * 4096), sp: Math.round(Math.sin(pitch) * 4096),
+  };
+
+  const g = ctx.createLinearGradient(0, 0, 0, H * 0.6);
+  g.addColorStop(0, rgb(f(SKY, 0, tick)));
+  g.addColorStop(1, rgb(f(SKY, 1, tick)));
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  const NG = Math.ceil(R * Q / STEP), N = 2 * NG + 1;
+  const x0 = Math.floor(cam.x / STEP) - NG, z0 = Math.floor(cam.z / STEP) - NG;
+  const sinY = Math.sin(yaw), cosY = Math.cos(yaw);
+  const ahead = (wx, wz) => (wx - fx) * sinY + (wz - fz) * cosY;
+  const hs = new Int32Array(N * N), spos = new Array(N * N);
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const k = j * N + i, X = (x0 + i) * STEP, Z = (z0 + j) * STEP;
+    if (ahead(X / Q, Z / Q) < -2) { spos[k] = null; continue; }
+    hs[k] = f(TERRAIN, X, Z);
+    spos[k] = project(X, hs[k], Z);
+  }
+  const wpos = (k) => [(x0 + k % N) * STEP, hs[k], (z0 + Math.floor(k / N)) * STEP];
+
+  const items = [];
+  const near = 0.3 * Q, far = FAR * Q;
+  const visible = (a, b, c) => {
+    if (a[2] < near || b[2] < near || c[2] < near) return false;
+    if (Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) < 0.5) return false;
+    if ((a[2] + b[2] + c[2]) / 3 > far) return false;
+    return !(Math.max(a[0], b[0], c[0]) < 0 || Math.min(a[0], b[0], c[0]) > W ||
+             Math.max(a[1], b[1], c[1]) < 0 || Math.min(a[1], b[1], c[1]) > H);
+  };
+
+  for (let j = 0; j < N - 1; j++) for (let i = 0; i < N - 1; i++) {
+    const ka = j * N + i, kb = ka + 1, kc = ka + N, kd = kc + 1;
+    if (!spos[ka] || !spos[kb] || !spos[kc] || !spos[kd]) continue;
+    const flip = ((x0 + i + z0 + j) & 1) === 0;
+    for (const [p, q, r] of flip ? [[ka, kb, kd], [ka, kd, kc]] : [[ka, kb, kc], [kb, kd, kc]]) {
+      if (!visible(spos[p], spos[q], spos[r])) continue;
+      const depth = (spos[p][2] + spos[q][2] + spos[r][2]) / 3;
+      const avg = Math.round((hs[p] + hs[q] + hs[r]) / 3), max = Math.max(hs[p], hs[q], hs[r]);
+      const col = f(SHADE, ...wpos(p), ...wpos(q), ...wpos(r), avg, 0, Math.round(depth), tick, max);
+      items.push([depth, spos[p], spos[q], spos[r], rgb(col)]);
+    }
+  }
+
+  for (let gz = Math.floor(fz) - R; gz < Math.floor(fz) + R; gz++) for (let gx = Math.floor(fx) - R; gx < Math.floor(fx) + R; gx++) {
+    if (ahead(gx + 0.5, gz + 0.5) < -1) continue;
+    const hb = f(TREE_BASE, gx, gz);
+    if (hb === NONE) continue;
+    const base = project(gx * Q + Q / 2, hb, gz * Q + Q / 2);
+    if (base[2] < near || base[2] > far || base[0] < -60 || base[0] > W + 60 || base[1] < -60 || base[1] > H + 400) continue;
+    const kind = f(TREE_KIND, gx, gz, hb);
+    const n = kind === 1 ? 12 : 22, tris = kind === 1 ? CONIFER : BROADLEAF;
+    const vw = [], vs = [];
+    for (let v = 0; v < n; v++) {
+      const p = [0, 1, 2].map((c) => f(TREE_VERTEX, gx, gz, hb, kind, v, c, tick));
+      vw.push(p);
+      vs.push(project(...p));
+    }
+    for (const [a, b, c, mat] of tris) {
+      if (!visible(vs[a], vs[b], vs[c])) continue;
+      const depth = (vs[a][2] + vs[b][2] + vs[c][2]) / 3;
+      const m = mat === 0 ? kind + 1 : mat;
+      const col = f(SHADE, ...vw[a], ...vw[b], ...vw[c], 0, m, Math.round(depth), tick, 0);
+      items.push([base[2] - 128 + (depth - base[2]) / 8, vs[a], vs[b], vs[c], rgb(col)]);
+    }
+  }
+
+  const order = new Float64Array(items.length);
+  for (let i = 0; i < items.length; i++) order[i] = -Math.round(items[i][0]) * 65536 + i;
+  order.sort();
+  const out = (p, cx, cy) => {
+    const dx = p[0] - cx, dy = p[1] - cy, l = Math.hypot(dx, dy) || 1;
+    return [p[0] + dx / l * 0.5, p[1] + dy / l * 0.5];
+  };
+  for (let o = 0; o < order.length; o++) {
+    const [, a, b, c, col] = items[((order[o] % 65536) + 65536) % 65536];
+    const cx = (a[0] + b[0] + c[0]) / 3, cy = (a[1] + b[1] + c[1]) / 3;
+    const pa = out(a, cx, cy), pb = out(b, cx, cy), pc = out(c, cx, cy);
+    ctx.beginPath();
+    ctx.moveTo(pa[0], pa[1]);
+    ctx.lineTo(pb[0], pb[1]);
+    ctx.lineTo(pc[0], pc[1]);
+    ctx.closePath();
+    ctx.fillStyle = col;
+    ctx.fill();
+  }
+
+  const snow = f(SNOW_AMOUNT, tick);
+  ctx.fillStyle = "rgba(255,255,255,0.85)";
+  for (let i = 0; i < snow; i++) {
+    const p = project(...[0, 1, 2].map((c) => f(SNOW, i, c, tick, cam.x, cam.y, cam.z)));
+    if (p[2] < near) continue;
+    const s = Math.max(1.5, 12 * Q / p[2]);
+    ctx.fillRect(p[0] - s / 2, p[1] - s / 2, s, s);
+  }
+}
+
+(function loop(now) { frame(now); requestAnimationFrame(loop); })(0);
+</script>
+</body>
+</html>
