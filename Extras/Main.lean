@@ -8,3 +8,4 @@ def main : IO Unit := do
   IO.FS.createDirAll "out"
   IO.FS.writeFile "out/raymarching.wat" (compileToWat RayMarching.prog)
   IO.FS.writeFile "out/seasons.wat" (compileToWat Seasons.prog)
+  IO.FS.writeFile "out/daisy.wat" (compileToWat Daisy.prog)
